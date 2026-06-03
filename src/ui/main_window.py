@@ -926,6 +926,7 @@ class MainWindow(QMainWindow):
         print(f"[GUEST] Blocker triggered! Source stream: {url}")
         self.guest_media_player.setSource(QUrl(url))
         self.guest_stack.setCurrentIndex(1)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
         self.showFullScreen()
          # 1. Hook general para suprimir todo el teclado normal
         keyboard.hook(lambda e: True, suppress=True)
@@ -935,7 +936,14 @@ class MainWindow(QMainWindow):
         keyboard.add_hotkey('alt+tab', lambda: None, suppress=True)
         keyboard.add_hotkey('alt+shift+tab', lambda: None, suppress=True)
         keyboard.add_hotkey('windows+tab', lambda: None, suppress=True)
-        
+        keyboard.add_hotkey('alt+f4', lambda: None, suppress=True)
+
+        # --- NUEVAS LÍNEAS PARA ELIMINAR WIN + TAB POR COMPLETO ---
+        keyboard.add_hotkey('windows+tab', lambda: None, suppress=True)
+        keyboard.add_hotkey('win+tab', lambda: None, suppress=True)
+        keyboard.add_hotkey('left windows+tab', lambda: None, suppress=True)
+        keyboard.add_hotkey('right windows+tab', lambda: None, suppress=True)
+
         # Bloquear las teclas individuales del sistema por si acaso
         keyboard.block_key('left windows')
         keyboard.block_key('right windows')
@@ -959,6 +967,7 @@ class MainWindow(QMainWindow):
     def on_guest_unblock_triggered(self):
         print("[GUEST] Blocker disabled. Restoring UI control dashboard.")
         keyboard.unhook_all() # Unhook global key suppressions
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint)
         self.showNormal()
         self.guest_media_player.stop()
         self.guest_media_player.setSource(QUrl())
