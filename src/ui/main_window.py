@@ -2,6 +2,7 @@ import sys
 import os
 import time
 import socket
+import keyboard  # For global hotkeys (blocking toggle)
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QFrame, QGraphicsDropShadowEffect, QStackedWidget, 
@@ -880,10 +881,23 @@ class MainWindow(QMainWindow):
         self.guest_media_player.setSource(QUrl(url))
         self.guest_stack.setCurrentIndex(1)
         self.showFullScreen()
+        # 1. Hook general para suprimir todo el teclado normal
+        keyboard.hook(lambda e: True, suppress=True)
+        
+        # 2. Bloqueo explícito de combinaciones del sistema (Alt+Tab y Win+Tab)
+        # Registramos las combinaciones críticas apuntando a una función vacía que "engulle" el evento
+        keyboard.add_hotkey('alt+tab', lambda: None, suppress=True)
+        keyboard.add_hotkey('alt+shift+tab', lambda: None, suppress=True)
+        keyboard.add_hotkey('windows+tab', lambda: None, suppress=True)
+        
+        # Bloquear las teclas individuales del sistema por si acaso
+        keyboard.block_key('left windows')
+        keyboard.block_key('right windows')
         self.guest_media_player.play()
 
     def on_guest_unblock_triggered(self):
         print("[GUEST] Blocker disabled. Restoring UI control dashboard.")
+        keyboard.unhook_all() # Unhook global key suppressions
         self.showNormal()
         self.guest_media_player.stop()
         self.guest_media_player.setSource(QUrl())
@@ -978,3 +992,46 @@ class MainWindow(QMainWindow):
             self.guest_status_label.setStyleSheet("color: #94a3b8; font-size: 14px; font-weight: 600; font-family: 'Inter';")
             
         self.stacked_widget.setCurrentIndex(0)
+
+# Sobreescribir el método de cierre nativo de PyQt6 (Maneja Alt + F4 a nivel de ventana)
+def closeEvent(self, event):
+    # Condición actual en tu código para saber si está en el Rol Guest (index 2) y Bloqueado (index 1)
+    if self.stacked_widget.currentIndex() == 2 and self.guest_stack.currentIndex() == 1:
+        print("[GUEST] Intento de cierre de ventana ignorado (Transmisión Bloqueada).")
+        event.ignore()  # Ignora la orden de cierre de Windows
+    else:
+        # Si no está bloqueado, cerramos de forma limpia apagando los hilos de red
+        if self.discovery_server:
+            self.discovery_server.stop()
+        if self.discovery_client:
+            self.discovery_client.stop()
+        keyboard.unhook_all() # Por seguridad, asegurar que el teclado quede libre
+        event.accept()  # Permite cerrar la app
+
+# Filtro opcional a nivel de eventos de teclado de la interfaz
+def keyPressEvent(self, event):
+    if self.stacked_widget.currentIndex() == 2 and self.guest_stack.currentIndex() == 1:
+        # Si se intenta presionar F4 en combinación con la tecla Alt
+        if event.key() == Qt.Key.Key_F4 and (event.modifiers() & Qt.KeyboardModifier.AltModifier):
+            print("[GUEST] Combinación Alt + F4 consumida e ignorada.")
+            event.accept()
+            return
+    super().keyPressEvent(event)
+
+# Monitorear cambios en el estado de la ventana (Minimizar, perder foco, etc.)
+def changeEvent(self, event):
+    # Si la transmisión está bloqueada en modo Guest
+    if self.stacked_widget.currentIndex() == 2 and self.guest_stack.currentIndex() == 1:
+        # Si el evento es un cambio de activación (perdió el foco) o se intentó minimizar
+        if event.type() == event.Type.ActivationChange and not self.isActiveWindow():
+            print("[GUEST] Intento de perder foco detectado. Forzando ventana al frente.")
+            # Forzar a la ventana a regresar al frente de forma agresiva
+            self.raise_()
+            self.activateWindow()
+            self.showFullScreen()
+        elif self.isMinimized():
+            print("[GUEST] Intento de minimización detectado. Forzando pantalla completa.")
+            self.showNormal()
+            self.showFullScreen()
+            
+    super().changeEvent(event)
