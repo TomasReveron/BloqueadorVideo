@@ -526,6 +526,49 @@ QPushButton#queueNavBtn:pressed {
 }
 """
 
+GUEST_CONNECT_BUTTON_STYLE = """
+QPushButton#connectButton {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #10b981, stop:1 #059669);
+    color: #ffffff;
+    font-size: 15px;
+    font-weight: 700;
+    font-family: 'Inter', 'Segoe UI', sans-serif;
+    border: none;
+    border-radius: 12px;
+    padding: 14px 28px;
+    min-width: 180px;
+}
+QPushButton#connectButton:hover {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #34d399, stop:1 #10b981);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+}
+QPushButton#connectButton:pressed {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #059669, stop:1 #047857);
+}
+"""
+
+GUEST_DISCONNECT_BUTTON_STYLE = """
+QPushButton#connectButton {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #ef4444, stop:1 #dc2626);
+    color: #ffffff;
+    font-size: 15px;
+    font-weight: 700;
+    font-family: 'Inter', 'Segoe UI', sans-serif;
+    border: none;
+    border-radius: 12px;
+    padding: 14px 28px;
+    min-width: 180px;
+}
+QPushButton#connectButton:hover {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #f87171, stop:1 #ef4444);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+}
+QPushButton#connectButton:pressed {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #dc2626, stop:1 #b91c1c);
+}
+"""
+
+
 
 
 

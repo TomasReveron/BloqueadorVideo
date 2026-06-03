@@ -4,7 +4,7 @@ import time
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QFrame, QGraphicsDropShadowEffect, QStackedWidget, 
-    QMessageBox, QSlider, QFileDialog, QTabWidget
+    QMessageBox, QSlider, QFileDialog, QTabWidget, QLineEdit
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QCursor
@@ -387,15 +387,46 @@ class MainWindow(QMainWindow):
         container.setGraphicsEffect(shadow)
 
         container_layout = QVBoxLayout(container)
-        container_layout.setContentsMargins(30, 50, 30, 50)
-        container_layout.setSpacing(30)
+        container_layout.setContentsMargins(30, 40, 30, 40)
+        container_layout.setSpacing(25)
 
         # Large "GUEST" Label
-        guest_title = QLabel("GUEST", self)
+        guest_title = QLabel("MODO GUEST", self)
         guest_title.setObjectName("roleTitle")
         guest_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         guest_title.setStyleSheet(styles.ROLE_TITLE_STYLE)
         container_layout.addWidget(guest_title)
+
+        # Connection status label
+        self.guest_status_label = QLabel("Estado: Desconectado", self)
+        self.guest_status_label.setStyleSheet("color: #94a3b8; font-size: 14px; font-weight: 600; font-family: 'Inter';")
+        self.guest_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        container_layout.addWidget(self.guest_status_label)
+
+        # IP Input layout
+        ip_layout = QVBoxLayout()
+        ip_layout.setSpacing(8)
+        
+        ip_label = QLabel("Dirección IP del Host (para VPN/Tailscale):", self)
+        ip_label.setStyleSheet("color: #64748b; font-size: 12px; font-weight: 600; font-family: 'Inter';")
+        ip_layout.addWidget(ip_label)
+
+        self.guest_ip_input = QLineEdit(self)
+        self.guest_ip_input.setObjectName("pathInput")
+        self.guest_ip_input.setPlaceholderText("Ej. 100.115.12.34 (Dejar vacío para auto-descubrimiento en LAN)")
+        self.guest_ip_input.setStyleSheet(styles.PATH_INPUT_STYLE)
+        ip_layout.addWidget(self.guest_ip_input)
+        
+        container_layout.addLayout(ip_layout)
+
+        # Connect button
+        self.guest_connect_btn = QPushButton("Conectar", self)
+        self.guest_connect_btn.setObjectName("connectButton")
+        self.guest_connect_btn.setCheckable(True)
+        self.guest_connect_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.guest_connect_btn.setStyleSheet(styles.GUEST_CONNECT_BUTTON_STYLE)
+        self.guest_connect_btn.clicked.connect(self.on_guest_connect_clicked)
+        container_layout.addWidget(self.guest_connect_btn, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # Back Button
         back_btn = QPushButton("Volver", self)
@@ -410,13 +441,40 @@ class MainWindow(QMainWindow):
 
         self.stacked_widget.addWidget(guest_widget)
 
+    def on_guest_connect_clicked(self):
+        if self.guest_connect_btn.isChecked():
+            host_ip = self.guest_ip_input.text().strip()
+            if not host_ip:
+                host_ip = None # Fallback to auto-discovery
+                
+            self.guest_status_label.setText("Estado: Conectado (Unicast)" if host_ip else "Estado: Escuchando Broadcast...")
+            self.guest_status_label.setStyleSheet("color: #10b981; font-size: 14px; font-weight: 600; font-family: 'Inter';")
+            
+            # Start client thread
+            self.discovery_client = DiscoveryClient(host_ip, self)
+            self.discovery_client.start()
+            
+            # Toggle button text and styling to red disconnect
+            self.guest_connect_btn.setText("Desconectar")
+            self.guest_connect_btn.setStyleSheet(styles.GUEST_DISCONNECT_BUTTON_STYLE)
+            self.guest_ip_input.setEnabled(False)
+        else:
+            if self.discovery_client:
+                self.discovery_client.stop()
+                self.discovery_client = None
+                
+            self.guest_status_label.setText("Estado: Desconectado")
+            self.guest_status_label.setStyleSheet("color: #94a3b8; font-size: 14px; font-weight: 600; font-family: 'Inter';")
+            self.guest_connect_btn.setText("Conectar")
+            self.guest_connect_btn.setStyleSheet(styles.GUEST_CONNECT_BUTTON_STYLE)
+            self.guest_ip_input.setEnabled(True)
+
     def add_or_update_discovered_device(self, hostname, ip):
         now = time.time()
         
         # If device is already in active tracker list, update last seen stamp and return
         if ip in self.active_devices:
             self.active_devices[ip]["last_seen"] = now
-            # If it was toggled OFF by the user, we keep it OFF, but update timestamp
             return
 
         print(f"[NETWORK] Discovered active client: {hostname} ({ip})")
@@ -511,8 +569,6 @@ class MainWindow(QMainWindow):
             self.sidebar_header.setText(f"Clientes Conectados ({len(self.active_devices)})")
 
     def on_device_toggled(self, hostname, active, frame, button, dot, host_label, ip_label):
-        # We find the device dictionary using its IP from hostname match
-        # (This remains an interface level state toggle for blocker authorization)
         for ip, device_info in self.active_devices.items():
             if device_info["hostname"] == hostname:
                 device_info["active"] = active
@@ -584,10 +640,6 @@ class MainWindow(QMainWindow):
         else:
             print("[ACTION] OS is Windows. Navigating to Guest View.")
             self.stacked_widget.setCurrentIndex(2)
-            
-            # Start UDP Guest listener thread
-            self.discovery_client = DiscoveryClient(self)
-            self.discovery_client.start()
 
     def on_block_clicked(self):
         print("[ACTION] TRANSMISSION BLOCKED! Signaling all active client instances.")
@@ -620,5 +672,17 @@ class MainWindow(QMainWindow):
         if self.discovery_client:
             self.discovery_client.stop()
             self.discovery_client = None
+            
+        # Reset Guest UI controls if they exist
+        if hasattr(self, 'guest_connect_btn') and self.guest_connect_btn is not None:
+            self.guest_connect_btn.setChecked(False)
+            self.guest_connect_btn.setText("Conectar")
+            self.guest_connect_btn.setStyleSheet(styles.GUEST_CONNECT_BUTTON_STYLE)
+        if hasattr(self, 'guest_ip_input') and self.guest_ip_input is not None:
+            self.guest_ip_input.setEnabled(True)
+            self.guest_ip_input.clear()
+        if hasattr(self, 'guest_status_label') and self.guest_status_label is not None:
+            self.guest_status_label.setText("Estado: Desconectado")
+            self.guest_status_label.setStyleSheet("color: #94a3b8; font-size: 14px; font-weight: 600; font-family: 'Inter';")
             
         self.stacked_widget.setCurrentIndex(0)

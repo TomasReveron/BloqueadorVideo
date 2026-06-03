@@ -87,47 +87,75 @@ class DiscoveryServer(QThread):
 
 
 class DiscoveryClient(QThread):
-    def __init__(self, parent=None):
+    def __init__(self, host_ip=None, parent=None):
         super().__init__(parent)
         self.running = True
+        self.host_ip = host_ip  # Optional direct Host IP address
         self.listen_port = 50005
         self.response_port = 50006
         self.sock = None
 
     def run(self):
+        import time
+        
         # Socket to listen for Host discovery broadcasts
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+        has_binded = False
         try:
             self.sock.bind(('', self.listen_port))
+            has_binded = True
+            print(f"[NETWORK] Guest Discovery Client active. Listening on UDP port {self.listen_port}...")
         except Exception as e:
-            print(f"[NETWORK] Guest listener socket failed on port {self.listen_port}: {e}")
-            return
+            print(f"[NETWORK] Guest listener socket failed to bind: {e}")
+            if self.host_ip:
+                print("[NETWORK] Continuing in Unicast-Only mode.")
+            else:
+                return
 
-        print(f"[NETWORK] Guest Discovery Client active. Listening on UDP port {self.listen_port}...")
+        if self.host_ip:
+            print(f"[NETWORK] Unicast ping enabled to targeted Host IP: {self.host_ip}")
 
+        counter = 0
         while self.running:
-            # Check for incoming broadcasts (non-blocking, select timeout of 1.0 sec)
-            r, _, _ = select.select([self.sock], [], [], 1.0)
-            if r:
-                try:
-                    data, addr = self.sock.recvfrom(1024)
-                    msg = data.decode('utf-8')
-                    if msg == "VIDEO_BLOCKER_DISCOVER":
-                        host_ip = addr[0]
-                        hostname = socket.gethostname()
-                        response = f"VIDEO_BLOCKER_GUEST_ACK:{hostname}"
-                        
-                        # Unicast reply directly to Host IP
-                        reply_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                        reply_sock.sendto(response.encode('utf-8'), (host_ip, self.response_port))
-                        reply_sock.close()
-                        print(f"[NETWORK] Responded to discovery from Host at {host_ip} ({hostname})")
-                except Exception as e:
-                    if self.running:
-                        print(f"[NETWORK] Guest socket receive error: {e}")
+            # 1. Listen for broadcasts (select timeout of 1.0 sec)
+            if has_binded:
+                r, _, _ = select.select([self.sock], [], [], 1.0)
+                if r:
+                    try:
+                        data, addr = self.sock.recvfrom(1024)
+                        msg = data.decode('utf-8')
+                        if msg == "VIDEO_BLOCKER_DISCOVER":
+                            self.send_ack(addr[0])
+                    except Exception as e:
+                        if self.running:
+                            print(f"[NETWORK] Guest socket receive error: {e}")
+            else:
+                # If socket binding failed, sleep 1.0s to simulate select timeout
+                time.sleep(1.0)
+
+            # 2. Periodically send active unicast ping to targeted Host IP
+            if self.host_ip:
+                counter += 1
+                if counter >= 3:  # Send ping every 3 seconds
+                    self.send_ack(self.host_ip)
+                    counter = 0
 
         self.close_sockets()
+
+    def send_ack(self, target_ip):
+        try:
+            hostname = socket.gethostname()
+            response = f"VIDEO_BLOCKER_GUEST_ACK:{hostname}"
+            
+            # Create a temporary socket to send unicast response
+            reply_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            reply_sock.sendto(response.encode('utf-8'), (target_ip, self.response_port))
+            reply_sock.close()
+            print(f"[NETWORK] Sent ACK to Host at {target_ip} ({hostname})")
+        except Exception as e:
+            print(f"[NETWORK] Failed sending ACK to {target_ip}: {e}")
 
     def close_sockets(self):
         if self.sock:
