@@ -567,9 +567,43 @@ QPushButton#connectButton:pressed {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #dc2626, stop:1 #b91c1c);
 }
 """
+PLAYLIST_CTRL_BUTTON_STYLE = """
+QPushButton {
+    background-color: #1e2030;
+    color: #94a3b8;
+    font-size: 13px;
+    font-weight: 700;
+    border: 1px solid #2d3142;
+    border-radius: 8px;
+    padding: 6px 12px;
+}
+QPushButton:hover {
+    background-color: #2b2f44;
+    color: #f1f5f9;
+    border-color: #4c566a;
+}
+QPushButton:checked {
+    background-color: #6366f1;
+    color: #ffffff;
+    border: none;
+}
+"""
 
-
-
-
-
-
+ADD_QUEUE_BUTTON_STYLE = """
+QPushButton {
+    background-color: #1e2030;
+    color: #10b981;
+    font-size: 13px;
+    font-weight: 700;
+    border: 1px solid #2d3142;
+    border-radius: 8px;
+    padding: 6px 12px;
+}
+QPushButton:hover {
+    background-color: #181a24;
+    border-color: #10b981;
+}
+QPushButton:pressed {
+    background-color: #0d0e12;
+}
+"""

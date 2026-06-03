@@ -226,6 +226,7 @@ class DiscoveryClient(QThread):
     pause_triggered = pyqtSignal()
     seek_triggered = pyqtSignal(int)    # position in ms
     sync_triggered = pyqtSignal(int)    # position in ms
+    volume_triggered = pyqtSignal(int)  # volume level 0-100
 
     def __init__(self, host_ip=None, parent=None):
         super().__init__(parent)
@@ -299,6 +300,12 @@ class DiscoveryClient(QThread):
                             try:
                                 ms = int(msg.split(":", 1)[1])
                                 self.sync_triggered.emit(ms)
+                            except ValueError:
+                                pass
+                        elif msg.startswith("VOLUME:"):
+                            try:
+                                val = int(msg.split(":", 1)[1])
+                                self.volume_triggered.emit(val)
                             except ValueError:
                                 pass
                     except Exception as e:

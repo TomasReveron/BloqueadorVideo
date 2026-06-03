@@ -69,6 +69,7 @@ class QueueItemWidget(QFrame):
 
         layout.addWidget(btn_container)
 
+
 class QueueListWidget(QListWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -76,15 +77,22 @@ class QueueListWidget(QListWidget):
         self.setAcceptDrops(False)
         self.setStyleSheet("background: transparent; border: none;")
         self.setObjectName("queueList")
-        self.queue_data = [] # Stores tuples: (idx, filename, duration)
+        self.queue_data = [] # Stores tuples: (idx, filename, duration, filepath)
 
     def populate(self, data):
         self.clear()
         self.queue_data = data
-        for i, (idx, filename, duration) in enumerate(self.queue_data):
+        for i, item_tuple in enumerate(self.queue_data):
+            # Backwards compatible check for legacy 3-element tuples
+            if len(item_tuple) == 3:
+                idx, filename, duration = item_tuple
+                filepath = ""
+            else:
+                idx, filename, duration, filepath = item_tuple
+                
             item = QListWidgetItem(self)
             
-            # Catch the checked signal argument to prevent overriding row index 'i'
+            # Use default arguments to prevent lambda index scoping capture bug
             up_cb = lambda checked=False, r=i: self.move_item_up(r)
             down_cb = lambda checked=False, r=i: self.move_item_down(r)
             
@@ -92,6 +100,11 @@ class QueueListWidget(QListWidget):
             item.setSizeHint(widget.sizeHint())
             self.addItem(item)
             self.setItemWidget(item, widget)
+
+    def add_video_to_queue(self, filename, filepath, duration="--:--"):
+        idx_str = f"{len(self.queue_data) + 1:02d}"
+        self.queue_data.append((idx_str, filename, duration, filepath))
+        self.rebuild_queue(len(self.queue_data) - 1)
 
     def move_item_up(self, row):
         if row <= 0:
@@ -110,9 +123,14 @@ class QueueListWidget(QListWidget):
     def rebuild_queue(self, select_row):
         # Update prefix numbers (01, 02, 03, etc.) sequentially
         updated_data = []
-        for i, (_, filename, duration) in enumerate(self.queue_data):
+        for i, item_tuple in enumerate(self.queue_data):
             idx_str = f"{i+1:02d}"
-            updated_data.append((idx_str, filename, duration))
+            if len(item_tuple) == 3:
+                _, filename, duration = item_tuple
+                filepath = ""
+            else:
+                _, filename, duration, filepath = item_tuple
+            updated_data.append((idx_str, filename, duration, filepath))
 
         self.populate(updated_data)
         self.setCurrentRow(select_row)

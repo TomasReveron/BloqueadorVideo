@@ -2,7 +2,7 @@ import sys
 import os
 import time
 import socket
-import keyboard  # For global hotkeys (blocking toggle)
+import random
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QFrame, QGraphicsDropShadowEffect, QStackedWidget, 
@@ -30,6 +30,12 @@ class MainWindow(QMainWindow):
         self.media_server = None
         self.transmission_blocked = False
         
+        # Playlist states
+        self.loop_single = False
+        self.loop_queue = False
+        self.shuffle_mode = False
+        self.current_playing_filepath = ""
+        
         # Native QMediaPlayer setup (Host)
         self.media_player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
@@ -37,6 +43,7 @@ class MainWindow(QMainWindow):
         
         # Playback state signal listener for synchronization triggers
         self.media_player.playbackStateChanged.connect(self.on_playback_state_changed)
+        self.media_player.mediaStatusChanged.connect(self.handle_media_status)
         
         # Native QMediaPlayer setup (Guest)
         self.guest_media_player = QMediaPlayer(self)
@@ -320,6 +327,21 @@ class MainWindow(QMainWindow):
         stop_btn.clicked.connect(self.on_stop_clicked)
         media_btn_layout.addWidget(stop_btn)
 
+        # Volume control slider
+        media_btn_layout.addSpacing(10)
+        vol_label = QLabel("🔊", self)
+        vol_label.setStyleSheet("color: #64748b; font-size: 14px;")
+        media_btn_layout.addWidget(vol_label)
+        
+        self.volume_slider = QSlider(Qt.Orientation.Horizontal, self)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(70)  # Default volume level
+        self.volume_slider.setFixedWidth(80)
+        self.volume_slider.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.volume_slider.setStyleSheet(styles.SLIDER_STYLE)
+        self.volume_slider.valueChanged.connect(self.on_volume_changed)
+        media_btn_layout.addWidget(self.volume_slider)
+
         playback_layout.addLayout(media_btn_layout)
 
         playback_layout.addStretch(1)
@@ -389,15 +411,51 @@ class MainWindow(QMainWindow):
 
         # Draggable Queue List replacing static rendering
         self.queue_list = QueueListWidget(self)
+        self.queue_list.itemDoubleClicked.connect(self.on_queue_item_double_clicked)
         
-        # Initial simulated play queue data
-        queue_items = [
-            ("01", "introduccion_proyecto.mp4", "04:12"),
-            ("02", "demo_bloqueador_v2.mkv", "08:45"),
-            ("03", "feedback_cliente.mp4", "12:10"),
-        ]
-        self.queue_list.populate(queue_items)
+        # Starts empty for actual folder picking
+        self.queue_list.populate([])
+
+        # Toolbar layout for Agregar and Loop/Shuffle controls
+        queue_toolbar = QHBoxLayout()
+        queue_toolbar.setSpacing(6)
         
+        add_btn = QPushButton("＋ Agregar", self)
+        add_btn.setStyleSheet(styles.ADD_QUEUE_BUTTON_STYLE)
+        add_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        add_btn.clicked.connect(self.add_file_to_queue)
+        queue_toolbar.addWidget(add_btn)
+        
+        queue_toolbar.addStretch(1)
+        
+        # Loop single button
+        self.loop_single_btn = QPushButton("🔂", self)
+        self.loop_single_btn.setCheckable(True)
+        self.loop_single_btn.setStyleSheet(styles.PLAYLIST_CTRL_BUTTON_STYLE)
+        self.loop_single_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.loop_single_btn.setToolTip("Repetir Video Actual")
+        self.loop_single_btn.toggled.connect(self.on_loop_single_toggled)
+        queue_toolbar.addWidget(self.loop_single_btn)
+        
+        # Loop queue button
+        self.loop_queue_btn = QPushButton("🔁", self)
+        self.loop_queue_btn.setCheckable(True)
+        self.loop_queue_btn.setStyleSheet(styles.PLAYLIST_CTRL_BUTTON_STYLE)
+        self.loop_queue_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.loop_queue_btn.setToolTip("Repetir toda la Cola")
+        self.loop_queue_btn.toggled.connect(self.on_loop_queue_toggled)
+        queue_toolbar.addWidget(self.loop_queue_btn)
+        
+        # Shuffle button
+        self.shuffle_btn = QPushButton("🔀", self)
+        self.shuffle_btn.setCheckable(True)
+        self.shuffle_btn.setStyleSheet(styles.PLAYLIST_CTRL_BUTTON_STYLE)
+        self.shuffle_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.shuffle_btn.setToolTip("Reproducción Aleatoria")
+        self.shuffle_btn.toggled.connect(self.on_shuffle_toggled)
+        queue_toolbar.addWidget(self.shuffle_btn)
+        
+        queue_tab_layout.addLayout(queue_toolbar)
         queue_tab_layout.addWidget(self.queue_list)
         self.tab_widget.addTab(queue_tab, "Cola")
 
@@ -524,6 +582,7 @@ class MainWindow(QMainWindow):
             self.discovery_client.pause_triggered.connect(self.guest_media_player.pause)
             self.discovery_client.seek_triggered.connect(self.guest_media_player.setPosition)
             self.discovery_client.sync_triggered.connect(self.on_guest_sync_triggered)
+            self.discovery_client.volume_triggered.connect(self.on_guest_volume_triggered)
             self.discovery_client.start()
             
             # Toggle button text and styling to red disconnect
@@ -624,6 +683,7 @@ class MainWindow(QMainWindow):
             self.discovery_server.send_command(ip, f"BLOCK_VIDEO:{stream_url}")
             curr_pos = self.media_player.position()
             self.discovery_server.send_command(ip, f"SEEK:{curr_pos}")
+            self.discovery_server.send_command(ip, f"VOLUME:{self.volume_slider.value()}")
             if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
                 self.discovery_server.send_command(ip, "PLAY")
             else:
@@ -666,6 +726,7 @@ class MainWindow(QMainWindow):
                         self.discovery_server.send_command(ip, f"BLOCK_VIDEO:{stream_url}")
                         curr_pos = self.media_player.position()
                         self.discovery_server.send_command(ip, f"SEEK:{curr_pos}")
+                        self.discovery_server.send_command(ip, f"VOLUME:{self.volume_slider.value()}")
                         if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
                             self.discovery_server.send_command(ip, "PLAY")
                         else:
@@ -747,6 +808,7 @@ class MainWindow(QMainWindow):
             print(f"[ACTION] Selected video: {file_path}")
             
             # Load selected local video path to media player and swap view stack index
+            self.current_playing_filepath = file_path
             self.media_player.setSource(QUrl.fromLocalFile(file_path))
             self.video_stack.setCurrentIndex(1)
 
@@ -834,9 +896,10 @@ class MainWindow(QMainWindow):
             stream_url = f"http://{host_ip}:50007/video"
             self.broadcast_command(f"BLOCK_VIDEO:{stream_url}")
             
-            # Synchronize position and state
+            # Synchronize position, volume and state
             curr_pos = self.media_player.position()
             self.broadcast_command(f"SEEK:{curr_pos}")
+            self.broadcast_command(f"VOLUME:{self.volume_slider.value()}")
             if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
                 self.broadcast_command("PLAY")
             else:
@@ -881,24 +944,10 @@ class MainWindow(QMainWindow):
         self.guest_media_player.setSource(QUrl(url))
         self.guest_stack.setCurrentIndex(1)
         self.showFullScreen()
-        # 1. Hook general para suprimir todo el teclado normal
-        keyboard.hook(lambda e: True, suppress=True)
-        
-        # 2. Bloqueo explícito de combinaciones del sistema (Alt+Tab y Win+Tab)
-        # Registramos las combinaciones críticas apuntando a una función vacía que "engulle" el evento
-        keyboard.add_hotkey('alt+tab', lambda: None, suppress=True)
-        keyboard.add_hotkey('alt+shift+tab', lambda: None, suppress=True)
-        keyboard.add_hotkey('windows+tab', lambda: None, suppress=True)
-        keyboard.add_hotkey('alt+f4', lambda: None, suppress=True)
-        
-        # Bloquear las teclas individuales del sistema por si acaso
-        keyboard.block_key('left windows')
-        keyboard.block_key('right windows')
         self.guest_media_player.play()
 
     def on_guest_unblock_triggered(self):
         print("[GUEST] Blocker disabled. Restoring UI control dashboard.")
-        keyboard.unhook_all() # Unhook global key suppressions
         self.showNormal()
         self.guest_media_player.stop()
         self.guest_media_player.setSource(QUrl())
@@ -926,6 +975,143 @@ class MainWindow(QMainWindow):
             s.close()
         return ip
 
+    # Loop/Shuffle Queue Toolbar Action triggers
+    def add_file_to_queue(self):
+        print("[ACTION] Add to queue clicked. Opening file dialog...")
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Agregar video a la cola", "", "Video Files (*.mp4 *.mkv *.avi *.mov *.wmv)"
+        )
+        if file_path:
+            filename = os.path.basename(file_path)
+            self.queue_list.add_video_to_queue(filename, file_path, duration="--:--")
+            print(f"[ACTION] Added to queue: {filename} ({file_path})")
+
+    def on_queue_item_double_clicked(self, item):
+        row = self.queue_list.row(item)
+        print(f"[ACTION] Queue item double clicked: row {row}")
+        self.play_queue_item(row)
+
+    def play_queue_item(self, row):
+        if row < 0 or row >= len(self.queue_list.queue_data):
+            return
+
+        item_tuple = self.queue_list.queue_data[row]
+        idx, filename, duration, filepath = item_tuple
+        
+        if not filepath or not os.path.exists(filepath):
+            print(f"[PLAYBACK ERROR] File does not exist: {filepath}")
+            return
+            
+        print(f"[PLAYBACK] Playing queue item {idx}: {filename}")
+        self.current_playing_filepath = filepath
+        self.queue_list.setCurrentRow(row)
+        
+        # Load the media source into the player
+        self.media_player.setSource(QUrl.fromLocalFile(filepath))
+        self.video_stack.setCurrentIndex(1)
+        self.preview_text.setText(f"Vista Previa del Video\nCargado: {filename}")
+        self.media_player.play()
+        
+        # Sync the new media file to Guests if blocked
+        if self.transmission_blocked:
+            # Recreate HTTP server with the new file
+            if self.media_server:
+                self.media_server.stop()
+            
+            # Start range HTTP server
+            self.media_server = MediaServerThread(filepath, port=50007, parent=self)
+            self.media_server.start()
+            
+            # Broadcast the updated stream URL
+            host_ip = self.get_local_ip()
+            stream_url = f"http://{host_ip}:50007/video"
+            self.broadcast_command(f"BLOCK_VIDEO:{stream_url}")
+            
+            # Sync volume and start playback state
+            self.broadcast_command(f"VOLUME:{self.volume_slider.value()}")
+            self.broadcast_command("SEEK:0")
+            self.broadcast_command("PLAY")
+
+    def handle_media_status(self, status):
+        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+            print("[PLAYBACK] End of media reached.")
+            
+            # 1. Loop Single Mode
+            if self.loop_single:
+                print("[PLAYBACK] Loop Single active. Replaying current video.")
+                self.media_player.setPosition(0)
+                self.media_player.play()
+                if self.transmission_blocked:
+                    self.broadcast_command("SEEK:0")
+                    self.broadcast_command("PLAY")
+                return
+
+            if len(self.queue_list.queue_data) == 0:
+                return
+
+            # Find the row index of the current playing filepath
+            current_index = -1
+            for i, (_, _, _, filepath) in enumerate(self.queue_list.queue_data):
+                if filepath == self.current_playing_filepath:
+                    current_index = i
+                    break
+
+            next_row = -1
+
+            # 2. Shuffle Mode
+            if self.shuffle_mode:
+                if len(self.queue_list.queue_data) > 1:
+                    # Pick random index different from current index
+                    choices = [r for r in range(len(self.queue_list.queue_data)) if r != current_index]
+                    next_row = random.choice(choices)
+                else:
+                    next_row = 0
+            else:
+                # Sequential logic
+                if current_index != -1 and current_index < len(self.queue_list.queue_data) - 1:
+                    next_row = current_index + 1
+                elif self.loop_queue:
+                    # Loop Queue mode active, wrap around to first item
+                    next_row = 0
+
+            if next_row != -1:
+                print(f"[PLAYBACK] Loading next item in queue: index {next_row}")
+                self.play_queue_item(next_row)
+            else:
+                print("[PLAYBACK] End of queue reached. Stopping.")
+                self.on_stop_clicked()
+
+    def on_loop_single_toggled(self, checked):
+        self.loop_single = checked
+        if checked:
+            # Uncheck Loop Queue button to maintain mutual exclusivity
+            self.loop_queue_btn.setChecked(False)
+        print(f"[PLAYLIST] Loop Single: {self.loop_single}")
+
+    def on_loop_queue_toggled(self, checked):
+        self.loop_queue = checked
+        if checked:
+            # Uncheck Loop Single button to maintain mutual exclusivity
+            self.loop_single_btn.setChecked(False)
+        print(f"[PLAYLIST] Loop Queue: {self.loop_queue}")
+
+    def on_shuffle_toggled(self, checked):
+        self.shuffle_mode = checked
+        print(f"[PLAYLIST] Shuffle Mode: {self.shuffle_mode}")
+
+    def on_volume_changed(self, value):
+        volume_float = value / 100.0
+        # Set local Host volume
+        self.audio_output.setVolume(volume_float)
+        
+        # Broadcast to all connected Guests if blocked
+        if self.transmission_blocked:
+            self.broadcast_command(f"VOLUME:{value}")
+
+    def on_guest_volume_triggered(self, val):
+        print(f"[GUEST] Remote Volume sync received: {val}%")
+        self.guest_audio_output.setVolume(val / 100.0)
+
     def go_to_menu(self):
         print("[ACTION] Navigating back to main menu.")
         
@@ -936,6 +1122,19 @@ class MainWindow(QMainWindow):
         self.time_curr.setText("00:00")
         self.time_total.setText("00:00")
         self.progress_slider.setValue(0)
+        self.volume_slider.setValue(70)
+        
+        # Reset playlist modes
+        self.loop_single = False
+        self.loop_queue = False
+        self.shuffle_mode = False
+        self.current_playing_filepath = ""
+        if hasattr(self, 'loop_single_btn'):
+            self.loop_single_btn.setChecked(False)
+        if hasattr(self, 'loop_queue_btn'):
+            self.loop_queue_btn.setChecked(False)
+        if hasattr(self, 'shuffle_btn'):
+            self.shuffle_btn.setChecked(False)
         
         # Stop Server socket thread
         if self.discovery_server:
@@ -993,46 +1192,3 @@ class MainWindow(QMainWindow):
             self.guest_status_label.setStyleSheet("color: #94a3b8; font-size: 14px; font-weight: 600; font-family: 'Inter';")
             
         self.stacked_widget.setCurrentIndex(0)
-
-# Sobreescribir el método de cierre nativo de PyQt6 (Maneja Alt + F4 a nivel de ventana)
-def closeEvent(self, event):
-    # Condición actual en tu código para saber si está en el Rol Guest (index 2) y Bloqueado (index 1)
-    if self.stacked_widget.currentIndex() == 2 and self.guest_stack.currentIndex() == 1:
-        print("[GUEST] Intento de cierre de ventana ignorado (Transmisión Bloqueada).")
-        event.ignore()  # Ignora la orden de cierre de Windows
-    else:
-        # Si no está bloqueado, cerramos de forma limpia apagando los hilos de red
-        if self.discovery_server:
-            self.discovery_server.stop()
-        if self.discovery_client:
-            self.discovery_client.stop()
-        keyboard.unhook_all() # Por seguridad, asegurar que el teclado quede libre
-        event.accept()  # Permite cerrar la app
-
-# Filtro opcional a nivel de eventos de teclado de la interfaz
-def keyPressEvent(self, event):
-    if self.stacked_widget.currentIndex() == 2 and self.guest_stack.currentIndex() == 1:
-        # Si se intenta presionar F4 en combinación con la tecla Alt
-        if event.key() == Qt.Key.Key_F4 and (event.modifiers() & Qt.KeyboardModifier.AltModifier):
-            print("[GUEST] Combinación Alt + F4 consumida e ignorada.")
-            event.accept()
-            return
-    super().keyPressEvent(event)
-
-# Monitorear cambios en el estado de la ventana (Minimizar, perder foco, etc.)
-def changeEvent(self, event):
-    # Si la transmisión está bloqueada en modo Guest
-    if self.stacked_widget.currentIndex() == 2 and self.guest_stack.currentIndex() == 1:
-        # Si el evento es un cambio de activación (perdió el foco) o se intentó minimizar
-        if event.type() == event.Type.ActivationChange and not self.isActiveWindow():
-            print("[GUEST] Intento de perder foco detectado. Forzando ventana al frente.")
-            # Forzar a la ventana a regresar al frente de forma agresiva
-            self.raise_()
-            self.activateWindow()
-            self.showFullScreen()
-        elif self.isMinimized():
-            print("[GUEST] Intento de minimización detectado. Forzando pantalla completa.")
-            self.showNormal()
-            self.showFullScreen()
-            
-    super().changeEvent(event)
