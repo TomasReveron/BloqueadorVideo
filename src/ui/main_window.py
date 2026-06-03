@@ -930,11 +930,17 @@ class MainWindow(QMainWindow):
 
     def on_guest_reload_triggered(self):
         """Called when Host advances to the next queue video (same HTTP URL, server changed file).
-        We do NOT call setSource or showFullScreen — the Guest stays in fullscreen with a
-        black frame while the server streams the new file from byte 0."""
-        print("[GUEST] Reload triggered — loading next video seamlessly.")
-        self.guest_media_player.stop()
-        self.guest_media_player.setPosition(0)
+        We force a fresh setSource with a cache-busting query param so QMediaPlayer
+        re-fetches the content from the server. We do NOT touch fullscreen or the stack."""
+        import time
+        current_url = self.guest_media_player.source()
+        url_str = current_url.toString()
+        # Strip any previous cache-buster query param
+        if '?' in url_str:
+            url_str = url_str.split('?')[0]
+        cache_bust_url = f"{url_str}?t={int(time.time() * 1000)}"
+        print(f"[GUEST] Reload triggered — re-fetching: {cache_bust_url}")
+        self.guest_media_player.setSource(QUrl(cache_bust_url))
         self.guest_media_player.play()
 
     def on_guest_unblock_triggered(self):
