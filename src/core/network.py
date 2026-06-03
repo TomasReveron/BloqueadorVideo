@@ -20,10 +20,13 @@ class MediaServerThread(QThread):
                 # Suppress request logs to keep terminal output clean
                 pass
 
-            def do_GET(self):
+            def do_HEAD(self):
+                self.send_headers_only()
+
+            def send_headers_only(self):
                 if not os.path.exists(file_path):
                     self.send_error(404, "File Not Found")
-                    return
+                    return None
 
                 try:
                     file_size = os.path.getsize(file_path)
@@ -55,11 +58,7 @@ class MediaServerThread(QThread):
 
                     if start >= file_size or end >= file_size or start > end:
                         self.send_error(416, "Requested Range Not Satisfiable")
-                        return
-
-                    f = open(file_path, "rb")
-                    f.seek(start)
-                    content_length = end - start + 1
+                        return None
 
                     if is_partial:
                         self.send_response(206)
@@ -68,10 +67,25 @@ class MediaServerThread(QThread):
                         self.send_response(200)
 
                     self.send_header("Content-Type", content_type)
-                    self.send_header("Content-Length", str(content_length))
+                    self.send_header("Content-Length", str(end - start + 1))
                     self.send_header("Accept-Ranges", "bytes")
                     self.send_header("Access-Control-Allow-Origin", "*")
                     self.end_headers()
+                    return start, end, file_size
+                except Exception as e:
+                    print(f"[HTTP] Error in send_headers_only: {e}")
+                    return None
+
+            def do_GET(self):
+                res = self.send_headers_only()
+                if not res:
+                    return
+                start, end, file_size = res
+
+                try:
+                    f = open(file_path, "rb")
+                    f.seek(start)
+                    content_length = end - start + 1
 
                     # Stream content in chunks to support quick seek interrupts
                     buffer_size = 64 * 1024
@@ -89,7 +103,7 @@ class MediaServerThread(QThread):
                         remaining -= len(data)
                     f.close()
                 except Exception as e:
-                    print(f"[HTTP] Error serving file: {e}")
+                    print(f"[HTTP] Error in do_GET: {e}")
 
         # Threaded server implementation to allow concurrent requests
         class ThreadedTCPServer(ThreadingHTTPServer):
@@ -255,8 +269,20 @@ class DiscoveryClient(QThread):
                         if msg == "VIDEO_BLOCKER_DISCOVER":
                             self.send_ack(addr[0])
                         elif msg.startswith("BLOCK_VIDEO:"):
-                            url = msg.split(":", 1)[1]
-                            self.block_triggered.emit(url)
+                            url_part = msg.split(":", 1)[1]
+                            if "http://" in url_part:
+                                import urllib.parse
+                                try:
+                                    parsed = urllib.parse.urlparse(url_part)
+                                    port = parsed.port if parsed.port else 50007
+                                    # Override the parsed Host IP with the UDP sender's actual IP address to prevent subnet mismatch
+                                    stream_url = f"http://{addr[0]}:{port}/video"
+                                except Exception:
+                                    stream_url = f"http://{addr[0]}:50007/video"
+                            else:
+                                stream_url = f"http://{addr[0]}:50007/video"
+                            
+                            self.block_triggered.emit(stream_url)
                         elif msg == "PLAY":
                             self.play_triggered.emit()
                         elif msg == "PAUSE":

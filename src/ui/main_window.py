@@ -41,6 +41,7 @@ class MainWindow(QMainWindow):
         self.guest_media_player = QMediaPlayer(self)
         self.guest_audio_output = QAudioOutput(self)
         self.guest_media_player.setAudioOutput(self.guest_audio_output)
+        self.guest_media_player.errorOccurred.connect(self.on_guest_media_error)
         
         self.init_ui()
 
@@ -892,6 +893,9 @@ class MainWindow(QMainWindow):
         if abs(guest_position - host_position) > 1000:
             print(f"[GUEST] Correcting playback drift: Host={host_position}ms, Guest={guest_position}ms")
             self.guest_media_player.setPosition(host_position)
+
+    def on_guest_media_error(self, error, error_string):
+        print(f"[GUEST ERROR] Media Player error encountered: {error_string} (Code: {error})")
 
     def get_local_ip(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
