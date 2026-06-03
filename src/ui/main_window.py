@@ -29,6 +29,7 @@ class MainWindow(QMainWindow):
         # Blocker streaming state
         self.media_server = None
         self.transmission_blocked = False
+        self.switching_media = False  # Flag to suppress transient unblocking during media swaps
         
         # Playlist states
         self.loop_single = False
@@ -294,17 +295,10 @@ class MainWindow(QMainWindow):
         self.media_player.positionChanged.connect(self.on_position_changed)
         self.media_player.durationChanged.connect(self.on_duration_changed)
 
-        # Media Control Buttons (Includes "Abrir Video" at the start)
+        # Media Control Buttons
         media_btn_layout = QHBoxLayout()
         media_btn_layout.setSpacing(12)
         media_btn_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        open_btn = QPushButton("📁  Abrir Video", self)
-        open_btn.setObjectName("mediaButton")
-        open_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        open_btn.setStyleSheet(styles.MEDIA_BUTTON_STYLE)
-        open_btn.clicked.connect(self.on_browse_clicked)
-        media_btn_layout.addWidget(open_btn)
 
         play_btn = QPushButton("▶  Play", self)
         play_btn.setObjectName("mediaButton")
@@ -785,8 +779,6 @@ class MainWindow(QMainWindow):
         self.progress_slider.setValue(0)
         self.time_curr.setText("00:00")
         print("[PLAYBACK] Stop clicked. Resetting timeline.")
-        if self.transmission_blocked:
-            self.broadcast_command("UNBLOCK")
 
     def format_time(self, ms):
         seconds = (ms // 1000) % 60
@@ -796,21 +788,6 @@ class MainWindow(QMainWindow):
             return f"{hours:d}:{minutes:02d}:{seconds:02d}"
         else:
             return f"{minutes:02d}:{seconds:02d}"
-
-    def on_browse_clicked(self):
-        print("[ACTION] Open file clicked. Opening file dialog...")
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Seleccionar archivo de video", "", "Video Files (*.mp4 *.mkv *.avi *.mov *.wmv)"
-        )
-        if file_path:
-            filename = os.path.basename(file_path)
-            self.preview_text.setText(f"Vista Previa del Video\nCargado: {filename}")
-            print(f"[ACTION] Selected video: {file_path}")
-            
-            # Load selected local video path to media player and swap view stack index
-            self.current_playing_filepath = file_path
-            self.media_player.setSource(QUrl.fromLocalFile(file_path))
-            self.video_stack.setCurrentIndex(1)
 
     def on_host_clicked(self):
         print("[ACTION] Host role selected!")
@@ -930,6 +907,8 @@ class MainWindow(QMainWindow):
     def on_playback_state_changed(self, state):
         if not self.transmission_blocked:
             return
+        if self.switching_media:
+            return # Suppress temporary unblocks during media transitions/loops
             
         if state == QMediaPlayer.PlaybackState.PlayingState:
             self.broadcast_command("PLAY")
@@ -985,6 +964,23 @@ class MainWindow(QMainWindow):
             filename = os.path.basename(file_path)
             self.queue_list.add_video_to_queue(filename, file_path, duration="--:--")
             print(f"[ACTION] Added to queue: {filename} ({file_path})")
+            
+            # Automatically load the first video if player is currently empty/idle
+            if self.media_player.source().isEmpty():
+                self.auto_load_first_item()
+
+    def auto_load_first_item(self):
+        if len(self.queue_list.queue_data) > 0:
+            item_tuple = self.queue_list.queue_data[0]
+            idx, filename, duration, filepath = item_tuple
+            if filepath and os.path.exists(filepath):
+                print(f"[PLAYLIST] Automatically staging first queue video: {filename}")
+                self.current_playing_filepath = filepath
+                self.media_player.setSource(QUrl.fromLocalFile(filepath))
+                self.video_stack.setCurrentIndex(1)
+                self.preview_text.setText(f"Vista Previa del Video\nCargado: {filename}")
+                self.progress_slider.setValue(0)
+                self.time_curr.setText("00:00")
 
     def on_queue_item_double_clicked(self, item):
         row = self.queue_list.row(item)
@@ -1005,6 +1001,9 @@ class MainWindow(QMainWindow):
         print(f"[PLAYBACK] Playing queue item {idx}: {filename}")
         self.current_playing_filepath = filepath
         self.queue_list.setCurrentRow(row)
+        
+        # Set switching flag to suppress transient UNBLOCK signals
+        self.switching_media = True
         
         # Load the media source into the player
         self.media_player.setSource(QUrl.fromLocalFile(filepath))
@@ -1031,55 +1030,57 @@ class MainWindow(QMainWindow):
             self.broadcast_command(f"VOLUME:{self.volume_slider.value()}")
             self.broadcast_command("SEEK:0")
             self.broadcast_command("PLAY")
+            
+        self.switching_media = False
 
     def handle_media_status(self, status):
+        from PyQt6.QtMultimedia import QMediaPlayer
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
             print("[PLAYBACK] End of media reached.")
             
             # 1. Loop Single Mode
             if self.loop_single:
                 print("[PLAYBACK] Loop Single active. Replaying current video.")
+                self.switching_media = True
                 self.media_player.setPosition(0)
                 self.media_player.play()
                 if self.transmission_blocked:
                     self.broadcast_command("SEEK:0")
                     self.broadcast_command("PLAY")
+                self.switching_media = False
                 return
 
             if len(self.queue_list.queue_data) == 0:
                 return
 
-            # Find the row index of the current playing filepath
-            current_index = -1
-            for i, (_, _, _, filepath) in enumerate(self.queue_list.queue_data):
-                if filepath == self.current_playing_filepath:
-                    current_index = i
-                    break
-
-            next_row = -1
-
-            # 2. Shuffle Mode
-            if self.shuffle_mode:
-                if len(self.queue_list.queue_data) > 1:
-                    # Pick random index different from current index
-                    choices = [r for r in range(len(self.queue_list.queue_data)) if r != current_index]
-                    next_row = random.choice(choices)
-                else:
-                    next_row = 0
+            # Shift queue logic
+            # Pop the first item (the one that just finished playing)
+            finished_item = self.queue_list.queue_data.pop(0)
+            
+            # If Loop Queue is active, append it to the end of the queue
+            if self.loop_queue:
+                self.queue_list.queue_data.append(finished_item)
+                print(f"[PLAYLIST] Loop Queue active. Moved '{finished_item[1]}' to the end.")
             else:
-                # Sequential logic
-                if current_index != -1 and current_index < len(self.queue_list.queue_data) - 1:
-                    next_row = current_index + 1
-                elif self.loop_queue:
-                    # Loop Queue mode active, wrap around to first item
-                    next_row = 0
-
-            if next_row != -1:
-                print(f"[PLAYBACK] Loading next item in queue: index {next_row}")
-                self.play_queue_item(next_row)
+                print(f"[PLAYLIST] Shifted queue. Removed finished video '{finished_item[1]}'.")
+            
+            # Rebuild queue widget to update visual lists and indexes
+            self.queue_list.rebuild_queue(0 if len(self.queue_list.queue_data) > 0 else -1)
+            
+            # Play the new first item in the queue
+            if len(self.queue_list.queue_data) > 0:
+                print("[PLAYLIST] Loading new first item in the queue.")
+                self.switching_media = True
+                self.play_queue_item(0)
+                self.switching_media = False
             else:
-                print("[PLAYBACK] End of queue reached. Stopping.")
-                self.on_stop_clicked()
+                print("[PLAYLIST] Queue empty. Stopping.")
+                self.current_playing_filepath = ""
+                self.media_player.stop()
+                self.progress_slider.setValue(0)
+                self.time_curr.setText("00:00")
+                if self.transmission_blocked:
+                    self.broadcast_command("UNBLOCK")
 
     def on_loop_single_toggled(self, checked):
         self.loop_single = checked
