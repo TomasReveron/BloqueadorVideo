@@ -889,6 +889,7 @@ class MainWindow(QMainWindow):
         keyboard.add_hotkey('alt+tab', lambda: None, suppress=True)
         keyboard.add_hotkey('alt+shift+tab', lambda: None, suppress=True)
         keyboard.add_hotkey('windows+tab', lambda: None, suppress=True)
+        keyboard.add_hotkey('alt+f4', lambda: None, suppress=True)
         
         # Bloquear las teclas individuales del sistema por si acaso
         keyboard.block_key('left windows')
