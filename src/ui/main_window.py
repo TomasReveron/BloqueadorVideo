@@ -879,10 +879,12 @@ class MainWindow(QMainWindow):
         print(f"[GUEST] Blocker triggered! Source stream: {url}")
         self.guest_media_player.setSource(QUrl(url))
         self.guest_stack.setCurrentIndex(1)
+        self.showFullScreen()
         self.guest_media_player.play()
 
     def on_guest_unblock_triggered(self):
         print("[GUEST] Blocker disabled. Restoring UI control dashboard.")
+        self.showNormal()
         self.guest_media_player.stop()
         self.guest_media_player.setSource(QUrl())
         self.guest_stack.setCurrentIndex(0)
@@ -961,6 +963,7 @@ class MainWindow(QMainWindow):
             self.guest_media_player.setSource(QUrl())
         if hasattr(self, 'guest_stack'):
             self.guest_stack.setCurrentIndex(0)
+        self.showNormal()
             
         # Reset Guest UI controls if they exist
         if hasattr(self, 'guest_connect_btn') and self.guest_connect_btn is not None:
