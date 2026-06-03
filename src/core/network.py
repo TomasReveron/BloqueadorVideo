@@ -12,8 +12,14 @@ class MediaServerThread(QThread):
         self.port = port
         self.httpd = None
 
+    def update_file_path(self, new_path):
+        self.file_path = new_path
+        if self.httpd:
+            self.httpd.file_path = new_path
+            print(f"[HTTP] Media Server updated target file: {new_path}")
+
     def run(self):
-        file_path = self.file_path
+        server_thread = self
         
         class SingleFileRangeHandler(http.server.BaseHTTPRequestHandler):
             def log_message(self, format, *args):
@@ -24,7 +30,8 @@ class MediaServerThread(QThread):
                 self.send_headers_only()
 
             def send_headers_only(self):
-                if not os.path.exists(file_path):
+                file_path = self.server.file_path
+                if not file_path or not os.path.exists(file_path):
                     self.send_error(404, "File Not Found")
                     return None
 
@@ -81,6 +88,7 @@ class MediaServerThread(QThread):
                 if not res:
                     return
                 start, end, file_size = res
+                file_path = self.server.file_path
 
                 try:
                     f = open(file_path, "rb")
@@ -109,6 +117,7 @@ class MediaServerThread(QThread):
         class ThreadedTCPServer(ThreadingHTTPServer):
             allow_reuse_address = True
             stop_requested = False
+            file_path = server_thread.file_path
 
         try:
             self.httpd = ThreadedTCPServer(('', self.port), SingleFileRangeHandler)

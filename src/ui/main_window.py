@@ -779,6 +779,8 @@ class MainWindow(QMainWindow):
         self.progress_slider.setValue(0)
         self.time_curr.setText("00:00")
         print("[PLAYBACK] Stop clicked. Resetting timeline.")
+        if self.transmission_blocked:
+            self.broadcast_command("UNBLOCK")
 
     def format_time(self, ms):
         seconds = (ms // 1000) % 60
@@ -908,8 +910,14 @@ class MainWindow(QMainWindow):
         if not self.transmission_blocked:
             return
         if self.switching_media:
-            return # Suppress temporary unblocks during media transitions/loops
-            
+            # If we are transitioning, ignore the StoppedState to prevent Guest dropouts
+            if state == QMediaPlayer.PlaybackState.StoppedState:
+                print("[PLAYBACK] Ignoring transient StoppedState during media swap.")
+                return
+            # Clear switching flag when the player successfully starts rendering the new media
+            if state == QMediaPlayer.PlaybackState.PlayingState:
+                self.switching_media = False
+                
         if state == QMediaPlayer.PlaybackState.PlayingState:
             self.broadcast_command("PLAY")
         elif state == QMediaPlayer.PlaybackState.PausedState:
@@ -1013,13 +1021,12 @@ class MainWindow(QMainWindow):
         
         # Sync the new media file to Guests if blocked
         if self.transmission_blocked:
-            # Recreate HTTP server with the new file
+            # Dynamic HTTP server file-path update without shutting down the TCP listener
             if self.media_server:
-                self.media_server.stop()
-            
-            # Start range HTTP server
-            self.media_server = MediaServerThread(filepath, port=50007, parent=self)
-            self.media_server.start()
+                self.media_server.update_file_path(filepath)
+            else:
+                self.media_server = MediaServerThread(filepath, port=50007, parent=self)
+                self.media_server.start()
             
             # Broadcast the updated stream URL
             host_ip = self.get_local_ip()
@@ -1031,10 +1038,14 @@ class MainWindow(QMainWindow):
             self.broadcast_command("SEEK:0")
             self.broadcast_command("PLAY")
             
-        self.switching_media = False
+        # Do NOT reset switching_media = False here. Let the playbackStateChanged signal reset it when it enters PlayingState!
 
     def handle_media_status(self, status):
         from PyQt6.QtMultimedia import QMediaPlayer
+        # Safely reset switching_media if media becomes invalid or fails loading
+        if status == QMediaPlayer.MediaStatus.InvalidMedia:
+            self.switching_media = False
+            
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
             print("[PLAYBACK] End of media reached.")
             
@@ -1047,7 +1058,6 @@ class MainWindow(QMainWindow):
                 if self.transmission_blocked:
                     self.broadcast_command("SEEK:0")
                     self.broadcast_command("PLAY")
-                self.switching_media = False
                 return
 
             if len(self.queue_list.queue_data) == 0:
@@ -1070,9 +1080,7 @@ class MainWindow(QMainWindow):
             # Play the new first item in the queue
             if len(self.queue_list.queue_data) > 0:
                 print("[PLAYLIST] Loading new first item in the queue.")
-                self.switching_media = True
                 self.play_queue_item(0)
-                self.switching_media = False
             else:
                 print("[PLAYLIST] Queue empty. Stopping.")
                 self.current_playing_filepath = ""
