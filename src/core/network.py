@@ -236,6 +236,7 @@ class DiscoveryClient(QThread):
     seek_triggered = pyqtSignal(int)    # position in ms
     sync_triggered = pyqtSignal(int)    # position in ms
     volume_triggered = pyqtSignal(int)  # volume level 0-100
+    reload_triggered = pyqtSignal()     # next video in queue (same URL, server changed file)
 
     def __init__(self, host_ip=None, parent=None):
         super().__init__(parent)
@@ -299,6 +300,8 @@ class DiscoveryClient(QThread):
                             self.pause_triggered.emit()
                         elif msg == "UNBLOCK":
                             self.unblock_triggered.emit()
+                        elif msg == "RELOAD_VIDEO":
+                            self.reload_triggered.emit()
                         elif msg.startswith("SEEK:"):
                             try:
                                 ms = int(msg.split(":", 1)[1])

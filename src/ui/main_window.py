@@ -577,6 +577,7 @@ class MainWindow(QMainWindow):
             self.discovery_client.seek_triggered.connect(self.guest_media_player.setPosition)
             self.discovery_client.sync_triggered.connect(self.on_guest_sync_triggered)
             self.discovery_client.volume_triggered.connect(self.on_guest_volume_triggered)
+            self.discovery_client.reload_triggered.connect(self.on_guest_reload_triggered)
             self.discovery_client.start()
             
             # Toggle button text and styling to red disconnect
@@ -920,10 +921,20 @@ class MainWindow(QMainWindow):
 
     # Guest listener callbacks
     def on_guest_block_triggered(self, url):
+        """Called when the Host starts blocking (first time). Sets source and enters fullscreen."""
         print(f"[GUEST] Blocker triggered! Source stream: {url}")
         self.guest_media_player.setSource(QUrl(url))
         self.guest_stack.setCurrentIndex(1)
         self.showFullScreen()
+        self.guest_media_player.play()
+
+    def on_guest_reload_triggered(self):
+        """Called when Host advances to the next queue video (same HTTP URL, server changed file).
+        We do NOT call setSource or showFullScreen — the Guest stays in fullscreen with a
+        black frame while the server streams the new file from byte 0."""
+        print("[GUEST] Reload triggered — loading next video seamlessly.")
+        self.guest_media_player.stop()
+        self.guest_media_player.setPosition(0)
         self.guest_media_player.play()
 
     def on_guest_unblock_triggered(self):
@@ -1018,15 +1029,11 @@ class MainWindow(QMainWindow):
                 self.media_server = MediaServerThread(filepath, port=50007, parent=self)
                 self.media_server.start()
             
-            # Broadcast the updated stream URL
-            host_ip = self.get_local_ip()
-            stream_url = f"http://{host_ip}:50007/video"
-            self.broadcast_command(f"BLOCK_VIDEO:{stream_url}")
-            
-            # Sync volume and start playback state
+            # Send RELOAD_VIDEO instead of BLOCK_VIDEO so the Guest stays in fullscreen.
+            # The HTTP URL is unchanged; the server has already swapped to the new file.
+            # The Guest will stop → seek(0) → play on the same QMediaPlayer instance.
+            self.broadcast_command("RELOAD_VIDEO")
             self.broadcast_command(f"VOLUME:{self.volume_slider.value()}")
-            self.broadcast_command("SEEK:0")
-            self.broadcast_command("PLAY")
 
     def handle_media_status(self, status):
         from PyQt6.QtMultimedia import QMediaPlayer
