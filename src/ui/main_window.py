@@ -1,17 +1,20 @@
 import sys
 import os
 import time
+import socket
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QFrame, QGraphicsDropShadowEffect, QStackedWidget, 
     QMessageBox, QSlider, QFileDialog, QTabWidget, QLineEdit
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QUrl
 from PyQt6.QtGui import QColor, QCursor
+from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PyQt6.QtMultimediaWidgets import QVideoWidget
 
 from src.ui import styles
 from src.ui.draggable_queue import QueueListWidget
-from src.core.network import DiscoveryServer, DiscoveryClient
+from src.core.network import DiscoveryServer, DiscoveryClient, MediaServerThread
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -21,6 +24,23 @@ class MainWindow(QMainWindow):
         self.discovery_client = None
         self.active_devices = {}  # {ip: {"hostname": str, "frame": QFrame, ...}}
         self.timeout_timer = None
+        
+        # Blocker streaming state
+        self.media_server = None
+        self.transmission_blocked = False
+        
+        # Native QMediaPlayer setup (Host)
+        self.media_player = QMediaPlayer(self)
+        self.audio_output = QAudioOutput(self)
+        self.media_player.setAudioOutput(self.audio_output)
+        
+        # Playback state signal listener for synchronization triggers
+        self.media_player.playbackStateChanged.connect(self.on_playback_state_changed)
+        
+        # Native QMediaPlayer setup (Guest)
+        self.guest_media_player = QMediaPlayer(self)
+        self.guest_audio_output = QAudioOutput(self)
+        self.guest_media_player.setAudioOutput(self.guest_audio_output)
         
         self.init_ui()
 
@@ -195,27 +215,45 @@ class MainWindow(QMainWindow):
         playback_header.setStyleSheet(styles.PLAYBACK_HEADER_STYLE)
         playback_layout.addWidget(playback_header)
 
-        # Video Preview Display Area (Expanded Height to 260px)
+        # Video Preview Display Area (Using QStackedWidget to host viewport dynamically)
         self.video_preview = QFrame(self)
         self.video_preview.setObjectName("videoScreen")
         self.video_preview.setFixedHeight(260)
         self.video_preview.setStyleSheet(styles.VIDEO_SCREEN_STYLE)
         
-        video_layout = QVBoxLayout(self.video_preview)
-        video_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        video_layout.setSpacing(12)
+        self.video_stack = QStackedWidget(self.video_preview)
+        
+        # Page 0: Dark Placeholder Screen
+        placeholder_widget = QWidget(self)
+        placeholder_layout = QVBoxLayout(placeholder_widget)
+        placeholder_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        placeholder_layout.setSpacing(12)
         
         play_icon = QLabel("▶", self)
         play_icon.setObjectName("videoPlayIcon")
         play_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         play_icon.setStyleSheet(styles.VIDEO_PLAY_ICON_STYLE)
-        video_layout.addWidget(play_icon)
+        placeholder_layout.addWidget(play_icon)
         
         self.preview_text = QLabel("Vista Previa del Video\nNingún archivo cargado", self)
         self.preview_text.setObjectName("videoPreviewText")
         self.preview_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_text.setStyleSheet(styles.VIDEO_PREVIEW_TEXT_STYLE)
-        video_layout.addWidget(self.preview_text)
+        placeholder_layout.addWidget(self.preview_text)
+        
+        self.video_stack.addWidget(placeholder_widget)
+        
+        # Page 1: Native Video Viewport Widget
+        self.video_widget = QVideoWidget(self)
+        self.video_stack.addWidget(self.video_widget)
+        
+        # Add stack to outer preview frame layout
+        preview_outer_layout = QVBoxLayout(self.video_preview)
+        preview_outer_layout.setContentsMargins(0, 0, 0, 0)
+        preview_outer_layout.addWidget(self.video_stack)
+        
+        # Attach player viewport
+        self.media_player.setVideoOutput(self.video_widget)
         
         playback_layout.addWidget(self.video_preview)
 
@@ -224,23 +262,28 @@ class MainWindow(QMainWindow):
         slider_layout.setSpacing(6)
 
         timeline_labels = QHBoxLayout()
-        time_curr = QLabel("00:00", self)
-        time_curr.setObjectName("timeLabel")
-        time_curr.setStyleSheet(styles.TIME_LABEL_STYLE)
-        time_total = QLabel("00:00", self)
-        time_total.setObjectName("timeLabel")
-        time_total.setStyleSheet(styles.TIME_LABEL_STYLE)
-        timeline_labels.addWidget(time_curr)
+        self.time_curr = QLabel("00:00", self)
+        self.time_curr.setObjectName("timeLabel")
+        self.time_curr.setStyleSheet(styles.TIME_LABEL_STYLE)
+        self.time_total = QLabel("00:00", self)
+        self.time_total.setObjectName("timeLabel")
+        self.time_total.setStyleSheet(styles.TIME_LABEL_STYLE)
+        timeline_labels.addWidget(self.time_curr)
         timeline_labels.addStretch(1)
-        timeline_labels.addWidget(time_total)
+        timeline_labels.addWidget(self.time_total)
         slider_layout.addLayout(timeline_labels)
 
         self.progress_slider = QSlider(Qt.Orientation.Horizontal, self)
         self.progress_slider.setValue(0) 
         self.progress_slider.setStyleSheet(styles.SLIDER_STYLE)
+        self.progress_slider.sliderMoved.connect(self.set_media_position)
         slider_layout.addWidget(self.progress_slider)
 
         playback_layout.addLayout(slider_layout)
+
+        # Connect QMediaPlayer signals to keep slider & timestamps in sync
+        self.media_player.positionChanged.connect(self.on_position_changed)
+        self.media_player.durationChanged.connect(self.on_duration_changed)
 
         # Media Control Buttons (Includes "Abrir Video" at the start)
         media_btn_layout = QHBoxLayout()
@@ -258,21 +301,21 @@ class MainWindow(QMainWindow):
         play_btn.setObjectName("mediaButton")
         play_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         play_btn.setStyleSheet(styles.MEDIA_BUTTON_STYLE)
-        play_btn.clicked.connect(lambda: print("[PLAYBACK] Play clicked"))
+        play_btn.clicked.connect(self.media_player.play)
         media_btn_layout.addWidget(play_btn)
 
         pause_btn = QPushButton("❚❚  Pause", self)
         pause_btn.setObjectName("mediaButton")
         pause_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         pause_btn.setStyleSheet(styles.MEDIA_BUTTON_STYLE)
-        pause_btn.clicked.connect(lambda: print("[PLAYBACK] Pause clicked"))
+        pause_btn.clicked.connect(self.media_player.pause)
         media_btn_layout.addWidget(pause_btn)
 
         stop_btn = QPushButton("■  Stop", self)
         stop_btn.setObjectName("mediaButton")
         stop_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         stop_btn.setStyleSheet(styles.MEDIA_BUTTON_STYLE)
-        stop_btn.clicked.connect(lambda: print("[PLAYBACK] Stop clicked"))
+        stop_btn.clicked.connect(self.on_stop_clicked)
         media_btn_layout.addWidget(stop_btn)
 
         playback_layout.addLayout(media_btn_layout)
@@ -369,10 +412,22 @@ class MainWindow(QMainWindow):
         guest_widget.setObjectName("centralWidget")
         guest_widget.setStyleSheet(styles.CENTRAL_WIDGET_STYLE)
 
-        layout = QVBoxLayout(guest_widget)
-        layout.setContentsMargins(40, 40, 40, 40)
+        guest_outer_layout = QVBoxLayout(guest_widget)
+        guest_outer_layout.setContentsMargins(0, 0, 0, 0)
+        guest_outer_layout.setSpacing(0)
 
-        layout.addStretch(1)
+        # Guest view stack manager
+        self.guest_stack = QStackedWidget(guest_widget)
+        guest_outer_layout.addWidget(self.guest_stack)
+
+        # PAGE 0: Connection Panel View
+        connection_widget = QWidget(self)
+        connection_widget.setObjectName("centralWidget")
+        connection_widget.setStyleSheet(styles.CENTRAL_WIDGET_STYLE)
+        
+        connection_layout = QVBoxLayout(connection_widget)
+        connection_layout.setContentsMargins(40, 40, 40, 40)
+        connection_layout.addStretch(1)
 
         # Container card
         container = QFrame(self)
@@ -436,8 +491,17 @@ class MainWindow(QMainWindow):
         back_btn.clicked.connect(self.go_to_menu)
         container_layout.addWidget(back_btn, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        layout.addWidget(container)
-        layout.addStretch(1)
+        connection_layout.addWidget(container)
+        connection_layout.addStretch(1)
+        self.guest_stack.addWidget(connection_widget)
+
+        # PAGE 1: Control-less Video Viewport for Host Broadcasting
+        self.guest_video_widget = QVideoWidget(self)
+        self.guest_video_widget.setStyleSheet("background-color: #000000;")
+        self.guest_stack.addWidget(self.guest_video_widget)
+
+        # Bind Guest video player output canvas
+        self.guest_media_player.setVideoOutput(self.guest_video_widget)
 
         self.stacked_widget.addWidget(guest_widget)
 
@@ -452,6 +516,12 @@ class MainWindow(QMainWindow):
             
             # Start client thread
             self.discovery_client = DiscoveryClient(host_ip, self)
+            self.discovery_client.block_triggered.connect(self.on_guest_block_triggered)
+            self.discovery_client.unblock_triggered.connect(self.on_guest_unblock_triggered)
+            self.discovery_client.play_triggered.connect(self.guest_media_player.play)
+            self.discovery_client.pause_triggered.connect(self.guest_media_player.pause)
+            self.discovery_client.seek_triggered.connect(self.guest_media_player.setPosition)
+            self.discovery_client.sync_triggered.connect(self.on_guest_sync_triggered)
             self.discovery_client.start()
             
             # Toggle button text and styling to red disconnect
@@ -463,6 +533,8 @@ class MainWindow(QMainWindow):
                 self.discovery_client.stop()
                 self.discovery_client = None
                 
+            self.on_guest_unblock_triggered() # Clear video canvas and reset view stack
+            
             self.guest_status_label.setText("Estado: Desconectado")
             self.guest_status_label.setStyleSheet("color: #94a3b8; font-size: 14px; font-weight: 600; font-family: 'Inter';")
             self.guest_connect_btn.setText("Conectar")
@@ -543,6 +615,18 @@ class MainWindow(QMainWindow):
         
         self.update_devices_count()
 
+        # If a late Guest connects and transmission is blocked, sync them immediately
+        if self.transmission_blocked and self.discovery_server:
+            host_ip = self.get_local_ip()
+            stream_url = f"http://{host_ip}:50007/video"
+            self.discovery_server.send_command(ip, f"BLOCK_VIDEO:{stream_url}")
+            curr_pos = self.media_player.position()
+            self.discovery_server.send_command(ip, f"SEEK:{curr_pos}")
+            if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                self.discovery_server.send_command(ip, "PLAY")
+            else:
+                self.discovery_server.send_command(ip, "PAUSE")
+
     def check_device_timeouts(self):
         now = time.time()
         to_delete = []
@@ -572,6 +656,20 @@ class MainWindow(QMainWindow):
         for ip, device_info in self.active_devices.items():
             if device_info["hostname"] == hostname:
                 device_info["active"] = active
+                # If blocker is active, immediately unblock or block the device that was toggled
+                if self.transmission_blocked and self.discovery_server:
+                    if active:
+                        host_ip = self.get_local_ip()
+                        stream_url = f"http://{host_ip}:50007/video"
+                        self.discovery_server.send_command(ip, f"BLOCK_VIDEO:{stream_url}")
+                        curr_pos = self.media_player.position()
+                        self.discovery_server.send_command(ip, f"SEEK:{curr_pos}")
+                        if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                            self.discovery_server.send_command(ip, "PLAY")
+                        else:
+                            self.discovery_server.send_command(ip, "PAUSE")
+                    else:
+                        self.discovery_server.send_command(ip, "UNBLOCK")
                 break
 
         if active:
@@ -595,15 +693,60 @@ class MainWindow(QMainWindow):
         frame.style().unpolish(frame)
         frame.style().polish(frame)
 
+    # QMediaPlayer event slot callbacks
+    def on_position_changed(self, position):
+        if not self.progress_slider.isSliderDown():
+            self.progress_slider.setValue(position)
+        self.time_curr.setText(self.format_time(position))
+        
+        # Periodic drift sync corrections (every 3 seconds)
+        if self.transmission_blocked:
+            now = time.time()
+            if not hasattr(self, 'last_sync_time'):
+                self.last_sync_time = 0
+            if now - self.last_sync_time > 3.0:
+                self.last_sync_time = now
+                self.broadcast_command(f"SYNC:{position}")
+
+    def on_duration_changed(self, duration):
+        self.progress_slider.setRange(0, duration)
+        self.time_total.setText(self.format_time(duration))
+
+    def set_media_position(self, position):
+        self.media_player.setPosition(position)
+        if self.transmission_blocked:
+            self.broadcast_command(f"SEEK:{position}")
+
+    def on_stop_clicked(self):
+        self.media_player.stop()
+        self.progress_slider.setValue(0)
+        self.time_curr.setText("00:00")
+        print("[PLAYBACK] Stop clicked. Resetting timeline.")
+        if self.transmission_blocked:
+            self.broadcast_command("UNBLOCK")
+
+    def format_time(self, ms):
+        seconds = (ms // 1000) % 60
+        minutes = (ms // 60000) % 60
+        hours = (ms // 3600000)
+        if hours > 0:
+            return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+        else:
+            return f"{minutes:02d}:{seconds:02d}"
+
     def on_browse_clicked(self):
         print("[ACTION] Open file clicked. Opening file dialog...")
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Seleccionar archivo de video", "", "Video Files (*.mp4 *.mkv *.avi *.mov)"
+            self, "Seleccionar archivo de video", "", "Video Files (*.mp4 *.mkv *.avi *.mov *.wmv)"
         )
         if file_path:
             filename = os.path.basename(file_path)
             self.preview_text.setText(f"Vista Previa del Video\nCargado: {filename}")
             print(f"[ACTION] Selected video: {file_path}")
+            
+            # Load selected local video path to media player and swap view stack index
+            self.media_player.setSource(QUrl.fromLocalFile(file_path))
+            self.video_stack.setCurrentIndex(1)
 
     def on_host_clicked(self):
         print("[ACTION] Host role selected!")
@@ -642,10 +785,136 @@ class MainWindow(QMainWindow):
             self.stacked_widget.setCurrentIndex(2)
 
     def on_block_clicked(self):
-        print("[ACTION] TRANSMISSION BLOCKED! Signaling all active client instances.")
+        if not self.transmission_blocked:
+            # Check if video is loaded
+            if not self.media_player.source().isValid() or self.media_player.source().isEmpty():
+                alert = QMessageBox(self)
+                alert.setIcon(QMessageBox.Icon.Warning)
+                alert.setWindowTitle("Advertencia")
+                alert.setText("Debe cargar un archivo de video antes de bloquear la transmisión.")
+                alert.setStyleSheet(styles.MESSAGE_BOX_STYLE)
+                alert.exec()
+                return
+
+            print("[ACTION] TRANSMISSION BLOCKED! Initializing Media Server and signaling Guests.")
+            self.transmission_blocked = True
+            
+            # Change block button text & style to warning alert orange color
+            self.block_btn.setText("DESBLOQUEAR TRANSMISIÓN")
+            self.block_btn.setStyleSheet("""
+                QPushButton#blockButton {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #d97706, stop:1 #b45309);
+                    color: #ffffff;
+                    font-size: 16px;
+                    font-weight: 800;
+                    font-family: 'Inter', 'Segoe UI', sans-serif;
+                    letter-spacing: 1px;
+                    border: none;
+                    border-radius: 12px;
+                    padding: 18px;
+                }
+                QPushButton#blockButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #fbbf24, stop:1 #d97706);
+                    border: 1px solid rgba(255, 255, 255, 0.2);
+                }
+                QPushButton#blockButton:pressed {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #b45309, stop:1 #92400e);
+                }
+            """)
+            
+            # Get loaded video path and fire up HTTP Range Server QThread
+            local_file = self.media_player.source().toLocalFile()
+            self.media_server = MediaServerThread(local_file, port=50007, parent=self)
+            self.media_server.start()
+            
+            # Format and send BLOCK command to active Clients
+            host_ip = self.get_local_ip()
+            stream_url = f"http://{host_ip}:50007/video"
+            self.broadcast_command(f"BLOCK_VIDEO:{stream_url}")
+            
+            # Synchronize position and state
+            curr_pos = self.media_player.position()
+            self.broadcast_command(f"SEEK:{curr_pos}")
+            if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                self.broadcast_command("PLAY")
+            else:
+                self.broadcast_command("PAUSE")
+
+        else:
+            print("[ACTION] TRANSMISSION UNBLOCKED! Stopping Server and resetting Guests.")
+            self.transmission_blocked = False
+            
+            # Restore block button style
+            self.block_btn.setText("BLOQUEAR TRANSMISIÓN")
+            self.block_btn.setStyleSheet(styles.BLOCK_BUTTON_STYLE)
+            
+            # Stop Media Server
+            if self.media_server:
+                self.media_server.stop()
+                self.media_server = None
+                
+            # Broadcast unblock command
+            self.broadcast_command("UNBLOCK")
+
+    def broadcast_command(self, command):
+        if self.discovery_server:
+            for ip, dev in self.active_devices.items():
+                if dev.get("active", True):
+                    self.discovery_server.send_command(ip, command)
+
+    def on_playback_state_changed(self, state):
+        if not self.transmission_blocked:
+            return
+            
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self.broadcast_command("PLAY")
+        elif state == QMediaPlayer.PlaybackState.PausedState:
+            self.broadcast_command("PAUSE")
+        elif state == QMediaPlayer.PlaybackState.StoppedState:
+            self.broadcast_command("UNBLOCK")
+
+    # Guest listener callbacks
+    def on_guest_block_triggered(self, url):
+        print(f"[GUEST] Blocker triggered! Source stream: {url}")
+        self.guest_media_player.setSource(QUrl(url))
+        self.guest_stack.setCurrentIndex(1)
+        self.guest_media_player.play()
+
+    def on_guest_unblock_triggered(self):
+        print("[GUEST] Blocker disabled. Restoring UI control dashboard.")
+        self.guest_media_player.stop()
+        self.guest_media_player.setSource(QUrl())
+        self.guest_stack.setCurrentIndex(0)
+
+    def on_guest_sync_triggered(self, host_position):
+        guest_position = self.guest_media_player.position()
+        # If play drift exceeds 1.0 second, force alignment
+        if abs(guest_position - host_position) > 1000:
+            print(f"[GUEST] Correcting playback drift: Host={host_position}ms, Guest={guest_position}ms")
+            self.guest_media_player.setPosition(host_position)
+
+    def get_local_ip(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # Doesn't need to connect successfully, just assigns an interface
+            s.connect(('10.255.255.255', 1))
+            ip = s.getsockname()[0]
+        except Exception:
+            ip = '127.0.0.1'
+        finally:
+            s.close()
+        return ip
 
     def go_to_menu(self):
         print("[ACTION] Navigating back to main menu.")
+        
+        # Halt QMediaPlayer media playback cleanly
+        self.media_player.stop()
+        self.video_stack.setCurrentIndex(0)
+        self.preview_text.setText("Vista Previa del Video\nNingún archivo cargado")
+        self.time_curr.setText("00:00")
+        self.time_total.setText("00:00")
+        self.progress_slider.setValue(0)
         
         # Stop Server socket thread
         if self.discovery_server:
@@ -656,6 +925,15 @@ class MainWindow(QMainWindow):
         if self.timeout_timer:
             self.timeout_timer.stop()
             self.timeout_timer = None
+            
+        # Stop media server and unblock if active
+        if hasattr(self, 'media_server') and self.media_server:
+            self.broadcast_command("UNBLOCK")
+            self.media_server.stop()
+            self.media_server = None
+        self.transmission_blocked = False
+        self.block_btn.setText("BLOQUEAR TRANSMISIÓN")
+        self.block_btn.setStyleSheet(styles.BLOCK_BUTTON_STYLE)
             
         # Clean UI devices layout
         if hasattr(self, 'devices_list_layout'):
@@ -672,6 +950,13 @@ class MainWindow(QMainWindow):
         if self.discovery_client:
             self.discovery_client.stop()
             self.discovery_client = None
+            
+        # Clean up Guest player and stack
+        if hasattr(self, 'guest_media_player'):
+            self.guest_media_player.stop()
+            self.guest_media_player.setSource(QUrl())
+        if hasattr(self, 'guest_stack'):
+            self.guest_stack.setCurrentIndex(0)
             
         # Reset Guest UI controls if they exist
         if hasattr(self, 'guest_connect_btn') and self.guest_connect_btn is not None:
