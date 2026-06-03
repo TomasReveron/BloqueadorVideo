@@ -29,7 +29,7 @@ class MainWindow(QMainWindow):
         # Blocker streaming state
         self.media_server = None
         self.transmission_blocked = False
-        self.switching_media = False  # Flag to suppress transient unblocking during media swaps
+
         
         # Playlist states
         self.loop_single = False
@@ -909,21 +909,14 @@ class MainWindow(QMainWindow):
     def on_playback_state_changed(self, state):
         if not self.transmission_blocked:
             return
-        if self.switching_media:
-            # If we are transitioning, ignore the StoppedState to prevent Guest dropouts
-            if state == QMediaPlayer.PlaybackState.StoppedState:
-                print("[PLAYBACK] Ignoring transient StoppedState during media swap.")
-                return
-            # Clear switching flag when the player successfully starts rendering the new media
-            if state == QMediaPlayer.PlaybackState.PlayingState:
-                self.switching_media = False
-                
+        # NOTE: We deliberately do NOT send UNBLOCK on StoppedState here.
+        # StoppedState fires transiently during every media swap (queue advance,
+        # loop restart, setSource calls). All legitimate UNBLOCK paths send the
+        # command explicitly: Stop button, Unblock button, and empty-queue handler.
         if state == QMediaPlayer.PlaybackState.PlayingState:
             self.broadcast_command("PLAY")
         elif state == QMediaPlayer.PlaybackState.PausedState:
             self.broadcast_command("PAUSE")
-        elif state == QMediaPlayer.PlaybackState.StoppedState:
-            self.broadcast_command("UNBLOCK")
 
     # Guest listener callbacks
     def on_guest_block_triggered(self, url):
@@ -1010,9 +1003,6 @@ class MainWindow(QMainWindow):
         self.current_playing_filepath = filepath
         self.queue_list.setCurrentRow(row)
         
-        # Set switching flag to suppress transient UNBLOCK signals
-        self.switching_media = True
-        
         # Load the media source into the player
         self.media_player.setSource(QUrl.fromLocalFile(filepath))
         self.video_stack.setCurrentIndex(1)
@@ -1037,22 +1027,15 @@ class MainWindow(QMainWindow):
             self.broadcast_command(f"VOLUME:{self.volume_slider.value()}")
             self.broadcast_command("SEEK:0")
             self.broadcast_command("PLAY")
-            
-        # Do NOT reset switching_media = False here. Let the playbackStateChanged signal reset it when it enters PlayingState!
 
     def handle_media_status(self, status):
         from PyQt6.QtMultimedia import QMediaPlayer
-        # Safely reset switching_media if media becomes invalid or fails loading
-        if status == QMediaPlayer.MediaStatus.InvalidMedia:
-            self.switching_media = False
-            
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
             print("[PLAYBACK] End of media reached.")
             
             # 1. Loop Single Mode
             if self.loop_single:
                 print("[PLAYBACK] Loop Single active. Replaying current video.")
-                self.switching_media = True
                 self.media_player.setPosition(0)
                 self.media_player.play()
                 if self.transmission_blocked:
